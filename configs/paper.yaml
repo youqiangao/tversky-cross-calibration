@@ -1,0 +1,73 @@
+seed: 42
+cache_schema: 2
+
+outputs:
+  cache_dir: tmp/data
+  figure_dir: figures
+
+rank_inference:
+  package: RankSEG==0.0.5
+  exact_threshold: 10000
+  smooth: 0.0
+  pruning_prob: 0.0
+  dice:
+    solver: BA
+    eps: 0.0001
+  iou:
+    solver: RMA
+
+simulation:
+  repetitions: 10000
+  dimensions: [10, 20, 50, 100, 200, 500]
+  excess_risk:
+    dimension: 50000
+    mixture_weights: [0.5, 0.5]
+    flip_probabilities:
+      start: 0.0
+      stop: 1.0
+      step: 0.02
+
+training:
+  models: [unet, fcn8]
+  pretrained: false
+  optimizer: adam
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  max_epochs: 200
+  checkpoint: lowest_validation_loss
+  normalization: imagenet
+  precision: fp32
+  deterministic: true
+  datasets:
+    oxford_pet:
+      data_root: datasets/OxfordIIITPet
+      image_size: 256
+      batch_size: 24
+      split: {train: 3312, validation: 368, evaluation: 3669}
+      augmentation: [horizontal_flip]
+    isic2017:
+      data_root: datasets/ISIC-2017
+      image_size: 512
+      batch_size: 4
+      split: {train: 2000, validation: 150, evaluation: 600}
+      augmentation: [horizontal_flip, vertical_flip, rotation_0_90_180_270]
+    kvasir_seg:
+      data_root: datasets/Kvasir-SEG
+      image_size: 320
+      batch_size: 8
+      split: {train: 720, validation: 80, evaluation: 200}
+      augmentation: [horizontal_flip, vertical_flip, rotation_0_90_180_270]
+    voc2012:
+      data_root: datasets/VOCtrainval_11-May-2012
+      image_size: 320
+      batch_size: 16
+      split: {train: 1317, validation: 147, evaluation: 1449}
+      augmentation: [horizontal_flip]
+      ignore_index: 255
+    cityscapes:
+      data_root: datasets/Cityscapes
+      image_size: 512
+      batch_size: 4
+      split: {train: 2677, validation: 298, evaluation: 500}
+      augmentation: [horizontal_flip]
+      ignore_index: 255

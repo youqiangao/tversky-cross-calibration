@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the accompanying paper."
+title: "Cross-Calibration between Tversky Indices in Segmentation"
+type: software
+authors:
+  - family-names: Gao
+    given-names: Youqian
+    email: "youqiangao@szu.edu.cn"
+    affiliation: "Shenzhen Audencia Financial Technology Institute, Shenzhen University"
+  - family-names: Dai
+    given-names: Ben
+    email: "bendai@cuhk.edu.hk"
+    affiliation: "Department of Statistics, The Chinese University of Hong Kong"
+repository-code: "https://github.com/youqiangao/tversky-cross-calibration"
+license: MIT
+version: 1.0.0
+date-released: 2026-08-14
