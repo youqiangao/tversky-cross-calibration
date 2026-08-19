@@ -1,4 +1,4 @@
-# Tversky Cross-Calibration Experiments
+# Cross-Calibration between Tversky Indices in Segmentation
 
 This repository contains the public reproduction code for the simulation and
 semantic-segmentation experiments in *Cross-Calibration between Tversky Indices in Segmentation*.
@@ -13,7 +13,7 @@ reported GPU experiments.
 ```bash
 conda create -n tversky-cc python=3.9
 conda activate tversky-cc
-pip install -r requirements-repro.txt
+pip install -r requirements.txt
 pip install -e .
 python -m unittest discover -s tests -v
 ```
