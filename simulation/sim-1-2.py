@@ -19,7 +19,7 @@ import torch
 from matplotlib.ticker import FormatStrFormatter
 
 from metrics import accuracy, dice_coeff, iou
-from tversky_cross_calibration import predict_rank
+from tversky_cross_calibration.compat import rank_dice, rank_iou
 from tversky_cross_calibration.config import PROJECT_ROOT, paper_config
 from tversky_cross_calibration.reproducibility import cache_matches, cache_metadata, seed_everything, write_cache_metadata
 
@@ -35,9 +35,12 @@ def sim(sample_size=100, width=10, height=10):
     prob[:, :, nonzero_num_pixel:width, :] = 0.4
     target = torch.bernoulli(prob)
 
-    prob_single = prob[:1]
-    predict_iou = predict_rank(prob_single, metric="iou").expand(sample_size, -1, -1, -1)
-    predict_dice = predict_rank(prob_single, metric="dice").expand(sample_size, -1, -1, -1)
+    if width < 100:
+        predict_iou, _, _ = rank_iou(prob, device=DEVICE, verbose=0)
+        predict_dice, _, _ = rank_dice(prob, device=DEVICE, verbose=0)
+    else:
+        predict_iou, _, _ = rank_iou(prob, device=DEVICE, verbose=0, exact=False)
+        predict_dice, _, _ = rank_dice(prob, device=DEVICE, verbose=0, exact=False)
 
     predict_t = prob > 0.5
 

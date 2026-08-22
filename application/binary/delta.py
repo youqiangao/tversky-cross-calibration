@@ -16,6 +16,7 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[2]))
 
 from application.binary.dataset import DATASET_CHOICES, build_dataset, default_data_root_for, normalize_dataset_name
+from application.checkpoints import infer_dataset_and_model
 from application.binary.engine import create_dataloader, load_trained_model
 from application.binary.utils import ensure_dir, load_checkpoint, logits_to_probabilities, resize_logits_to_size, resolve_device, save_csv, save_json
 
@@ -347,7 +348,8 @@ def infer_dataset_from_args(args: argparse.Namespace) -> Sequence[str]:
     if args.dataset is not None:
         return [normalize_dataset_name(args.dataset)]
     if args.checkpoint:
-        dataset_name = load_checkpoint(args.checkpoint[0], map_location="cpu")["dataset_name"]
+        payload = load_checkpoint(args.checkpoint[0], map_location="cpu")
+        dataset_name = payload.get("dataset_name") or infer_dataset_and_model(args.checkpoint[0])[0]
         return [normalize_dataset_name(dataset_name)]
     return DATASET_CHOICES
 

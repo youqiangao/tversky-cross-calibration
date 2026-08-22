@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import json
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -11,10 +12,12 @@ from tqdm import tqdm
 from tversky_cross_calibration.config import paper_config
 from tversky_cross_calibration.reproducibility import dataloader_generator, seed_worker
 
-from .dataset import build_dataset, normalize_dataset_name
+from application.checkpoints import extract_model_state_dict, infer_dataset_and_model, is_model_state_dict
+
+from .dataset import build_dataset, default_training_config_for, normalize_dataset_name
 from .metrics import RunningSegmentationMetrics
 from .models import build_model
-from .utils import ensure_dir, load_checkpoint, save_checkpoint, save_json
+from .utils import ensure_dir, load_checkpoint, logits_to_probabilities, resize_logits_to_size, save_checkpoint, save_json, save_mask_png, save_probability_map
 
 
 def json_load(path: str | Path) -> Dict:
@@ -171,9 +174,133 @@ def train_model(
     return best_checkpoint_path
 
 
-def load_trained_model(checkpoint_path: str | Path, device: torch.device):
-    checkpoint = load_checkpoint(checkpoint_path, map_location=device)
-    model = build_model(checkpoint["model_name"], num_classes=int(checkpoint.get("num_classes", 2))).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+def load_trained_model(
+    checkpoint_path: str | Path,
+    device: torch.device,
+    dataset_name: str | None = None,
+    model_name: str | None = None,
+):
+    payload = load_checkpoint(checkpoint_path, map_location=device)
+    if is_model_state_dict(payload):
+        inferred_dataset, inferred_model = infer_dataset_and_model(checkpoint_path)
+        resolved_dataset = normalize_dataset_name(dataset_name or inferred_dataset)
+        resolved_model = (model_name or inferred_model).lower()
+        checkpoint = {
+            "task_type": "binary",
+            "model_name": resolved_model,
+            "dataset_name": resolved_dataset,
+            "num_classes": 2,
+            "ignore_index": 255,
+            "model_state_dict": payload,
+            "image_size": int(default_training_config_for(resolved_dataset)["image_size"]),
+            "val_split": 0.1,
+            "split_seed": 42,
+        }
+    else:
+        checkpoint = payload
+    model = build_model(checkpoint["model_name"], num_classes=int(checkpoint.get("num_classes", 2))).to(device).float()
+    model.load_state_dict(extract_model_state_dict(checkpoint))
     model.eval()
     return model, checkpoint
+
+
+def evaluate_checkpoint(
+    checkpoint_path: str | Path,
+    data_root: str | Path,
+    split: str,
+    batch_size: int,
+    num_workers: int,
+    device: torch.device,
+    output_dir: str | Path | None = None,
+    dataset_name: str | None = None,
+    val_split: float | None = None,
+    split_seed: int | None = None,
+    max_samples: int | None = None,
+) -> Dict[str, float]:
+    model, checkpoint = load_trained_model(checkpoint_path, device, dataset_name=dataset_name)
+    resolved_dataset_name = normalize_dataset_name(dataset_name or checkpoint["dataset_name"])
+    resolved_val_split = float(checkpoint.get("val_split", 0.1) if val_split is None else val_split)
+    resolved_split_seed = int(checkpoint.get("split_seed", 42) if split_seed is None else split_seed)
+    ignore_index = int(checkpoint.get("ignore_index", 255))
+    loader = create_dataloader(
+        resolved_dataset_name,
+        data_root,
+        split,
+        int(checkpoint["image_size"]),
+        batch_size,
+        num_workers,
+        False,
+        False,
+        resolved_val_split,
+        resolved_split_seed,
+        max_samples,
+    )
+    metrics = evaluate(model, loader, torch.nn.CrossEntropyLoss(ignore_index=ignore_index), device)
+    if output_dir is not None:
+        save_json({"checkpoint": str(checkpoint_path), "split": split, "metrics": metrics}, Path(output_dir) / f"{split}_metrics.json")
+    return metrics
+
+
+@torch.no_grad()
+def export_predictions(
+    checkpoint_path: str | Path,
+    data_root: str | Path,
+    split: str,
+    batch_size: int,
+    num_workers: int,
+    device: torch.device,
+    output_dir: str | Path,
+    dataset_name: str | None = None,
+    val_split: float | None = None,
+    split_seed: int | None = None,
+    max_samples: int | None = None,
+) -> Dict[str, float]:
+    model, checkpoint = load_trained_model(checkpoint_path, device, dataset_name=dataset_name)
+    resolved_dataset_name = normalize_dataset_name(dataset_name or checkpoint["dataset_name"])
+    resolved_val_split = float(checkpoint.get("val_split", 0.1) if val_split is None else val_split)
+    resolved_split_seed = int(checkpoint.get("split_seed", 42) if split_seed is None else split_seed)
+    ignore_index = int(checkpoint.get("ignore_index", 255))
+    loader = create_dataloader(
+        resolved_dataset_name,
+        data_root,
+        split,
+        int(checkpoint["image_size"]),
+        batch_size,
+        num_workers,
+        False,
+        False,
+        resolved_val_split,
+        resolved_split_seed,
+        max_samples,
+    )
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=ignore_index)
+    metrics = RunningSegmentationMetrics(ignore_index=ignore_index)
+    running_loss = 0.0
+    output_dir = ensure_dir(output_dir)
+    probs_dir = ensure_dir(output_dir / "probabilities")
+    masks_dir = ensure_dir(output_dir / "pred_masks")
+    progress = tqdm(loader, desc=f"predict:{split}", leave=False)
+
+    for batch in progress:
+        images = batch["image"].to(device)
+        masks = batch["mask"].to(device)
+        logits = model(images)
+        loss = criterion(logits, masks)
+        running_loss += loss.item() * images.size(0)
+        metrics.update(logits, masks)
+
+        image_ids = batch["image_id"]
+        original_sizes = batch["original_size"]
+        for index in range(images.size(0)):
+            image_id = image_ids[index]
+            original_size = (int(original_sizes[0][index]), int(original_sizes[1][index]))
+            sample_logits = resize_logits_to_size(logits[index : index + 1], original_size)
+            sample_probabilities = np.asarray(logits_to_probabilities(sample_logits)[0].permute(1, 2, 0).cpu().tolist(), dtype=np.float32)
+            sample_prediction = np.asarray(torch.argmax(sample_logits, dim=1)[0].cpu().tolist(), dtype=np.uint8)
+            save_probability_map(sample_probabilities, probs_dir / f"{image_id}_probs.npy")
+            save_mask_png(sample_prediction, masks_dir / f"{image_id}_pred.png")
+
+    result = metrics.compute_rounded()
+    result["loss"] = round(running_loss / max(len(loader.dataset), 1), 6)
+    save_json({"checkpoint": str(checkpoint_path), "split": split, "metrics": result}, output_dir / "metrics.json")
+    return result

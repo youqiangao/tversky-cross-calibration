@@ -16,8 +16,10 @@ os.environ["XDG_CACHE_HOME"] = str(FONTCONFIG_DIR.parent)
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.ticker import FormatStrFormatter
+
 from metrics import dice_coeff, iou, macro_dice_coeff, macro_iou
-from tversky_cross_calibration import predict_rank
+from tversky_cross_calibration.compat import rank_dice, rank_iou
 from tversky_cross_calibration.config import PROJECT_ROOT, paper_config
 from tversky_cross_calibration.reproducibility import cache_matches, cache_metadata, seed_everything, write_cache_metadata
 
@@ -27,7 +29,7 @@ NUM_CLASSES = 3
 ETA = 12.0
 
 
-def build_probability_map_sim_3(width, height):
+def build_probability_map_sim_3_1(width, height):
     num_class = 3
     prob = torch.zeros((1, num_class, width, height), device=DEVICE)
     block_width = int(width / 10)
@@ -61,40 +63,51 @@ def build_probability_map_sim_3_2(width, height):
     return prob
 
 
+def build_probability_map(sample_size, width, height):
+    prob = build_probability_map_sim_3_2(width=width, height=height)
+    return prob.expand(sample_size, -1, -1, -1)
+
+
+def use_exact_rankseg(width):
+    return width < 200
+
+
 def reshape_micro_prediction(prediction_flat, reference_shape):
     return prediction_flat.reshape(reference_shape)
 
 
-def run_rankseg_once(prob_single):
-    return predict_rank(prob_single, metric="iou"), predict_rank(prob_single, metric="dice")
+def run_rankseg_once(prob_single, exact):
+    prediction_iou_single, _, _ = rank_iou(prob_single, device=DEVICE, verbose=0, exact=exact)
+    prediction_dice_single, _, _ = rank_dice(prob_single, device=DEVICE, verbose=0, exact=exact)
+    return prediction_iou_single, prediction_dice_single
 
 
-def expand_predictions_by_mask(prediction_3, prediction_32, sim3_mask, output_shape):
+def expand_predictions_by_mask(prediction_31, prediction_32, sim31_mask, output_shape):
     prediction = torch.empty(output_shape, dtype=torch.bool, device=DEVICE)
-    sim32_mask = ~sim3_mask
-    if sim3_mask.any():
-        prediction[sim3_mask] = prediction_3.expand(int(sim3_mask.sum().item()), -1, -1, -1)
+    sim32_mask = ~sim31_mask
+    if sim31_mask.any():
+        prediction[sim31_mask] = prediction_31.expand(int(sim31_mask.sum().item()), -1, -1, -1)
     if sim32_mask.any():
         prediction[sim32_mask] = prediction_32.expand(int(sim32_mask.sum().item()), -1, -1, -1)
     return prediction
 
 
-def run_mixed_rankseg_predictions(prob_map_3, prob_map_32, sim3_mask):
-    macro_iou_3, macro_dice_3 = run_rankseg_once(prob_map_3)
-    macro_iou_32, macro_dice_32 = run_rankseg_once(prob_map_32)
-    macro_iou = expand_predictions_by_mask(macro_iou_3, macro_iou_32, sim3_mask, prob_map_3.expand(len(sim3_mask), -1, -1, -1).shape)
-    macro_dice = expand_predictions_by_mask(macro_dice_3, macro_dice_32, sim3_mask, prob_map_3.expand(len(sim3_mask), -1, -1, -1).shape)
+def run_mixed_rankseg_predictions(prob_map_31, prob_map_32, sim31_mask, exact):
+    macro_iou_31, macro_dice_31 = run_rankseg_once(prob_map_31, exact)
+    macro_iou_32, macro_dice_32 = run_rankseg_once(prob_map_32, exact)
+    macro_iou = expand_predictions_by_mask(macro_iou_31, macro_iou_32, sim31_mask, prob_map_31.expand(len(sim31_mask), -1, -1, -1).shape)
+    macro_dice = expand_predictions_by_mask(macro_dice_31, macro_dice_32, sim31_mask, prob_map_31.expand(len(sim31_mask), -1, -1, -1).shape)
 
-    prob_micro_3 = prob_map_3.reshape(1, 1, -1, 1)
+    prob_micro_31 = prob_map_31.reshape(1, 1, -1, 1)
     prob_micro_32 = prob_map_32.reshape(1, 1, -1, 1)
-    micro_iou_flat_3, micro_dice_flat_3 = run_rankseg_once(prob_micro_3)
-    micro_iou_flat_32, micro_dice_flat_32 = run_rankseg_once(prob_micro_32)
-    micro_iou_3 = reshape_micro_prediction(micro_iou_flat_3, prob_map_3.shape)
-    micro_dice_3 = reshape_micro_prediction(micro_dice_flat_3, prob_map_3.shape)
+    micro_iou_flat_31, micro_dice_flat_31 = run_rankseg_once(prob_micro_31, exact)
+    micro_iou_flat_32, micro_dice_flat_32 = run_rankseg_once(prob_micro_32, exact)
+    micro_iou_31 = reshape_micro_prediction(micro_iou_flat_31, prob_map_31.shape)
+    micro_dice_31 = reshape_micro_prediction(micro_dice_flat_31, prob_map_31.shape)
     micro_iou_32 = reshape_micro_prediction(micro_iou_flat_32, prob_map_32.shape)
     micro_dice_32 = reshape_micro_prediction(micro_dice_flat_32, prob_map_32.shape)
-    micro_iou = expand_predictions_by_mask(micro_iou_3, micro_iou_32, sim3_mask, prob_map_3.expand(len(sim3_mask), -1, -1, -1).shape)
-    micro_dice = expand_predictions_by_mask(micro_dice_3, micro_dice_32, sim3_mask, prob_map_3.expand(len(sim3_mask), -1, -1, -1).shape)
+    micro_iou = expand_predictions_by_mask(micro_iou_31, micro_iou_32, sim31_mask, prob_map_31.expand(len(sim31_mask), -1, -1, -1).shape)
+    micro_dice = expand_predictions_by_mask(micro_dice_31, micro_dice_32, sim31_mask, prob_map_31.expand(len(sim31_mask), -1, -1, -1).shape)
 
     return {
         "macro-IoU": macro_iou,
@@ -104,17 +117,17 @@ def run_mixed_rankseg_predictions(prob_map_3, prob_map_32, sim3_mask):
     }
 
 
-def simulate_rankseg(sample_size=100, width=10, height=1):
-    sim3_mask = torch.rand(sample_size, device=DEVICE) < 0.5
-    prob_map_3 = build_probability_map_sim_3(width=width, height=height)
+def simulate_rankseg(sample_size=100, width=10, height=1, exact=False):
+    sim31_mask = torch.rand(sample_size, device=DEVICE) < 0.5
+    prob_map_31 = build_probability_map_sim_3_1(width=width, height=height)
     prob_map_32 = build_probability_map_sim_3_2(width=width, height=height)
     prob = torch.where(
-        sim3_mask.view(sample_size, 1, 1, 1),
-        prob_map_3.expand(sample_size, -1, -1, -1),
+        sim31_mask.view(sample_size, 1, 1, 1),
+        prob_map_31.expand(sample_size, -1, -1, -1),
         prob_map_32.expand(sample_size, -1, -1, -1),
     )
     target = torch.bernoulli(prob)
-    predictions = run_mixed_rankseg_predictions(prob_map_3, prob_map_32, sim3_mask)
+    predictions = run_mixed_rankseg_predictions(prob_map_31, prob_map_32, sim31_mask, exact)
     predict_iou = predictions["macro-IoU"]
     predict_dice = predictions["macro-Dice"]
 
@@ -141,7 +154,7 @@ def simulate_rankseg(sample_size=100, width=10, height=1):
 
     return {
         "target": target,
-        "sim3_mask": sim3_mask,
+        "sim31_mask": sim31_mask,
         "scores": {
             "macro-IoU": iou_score,
             "macro-Dice": dice_score,
@@ -230,24 +243,24 @@ def build_group_flip_summaries(base_prediction, target, flip_probs, use_micro_me
 
 def est_delta_micro(width=10, height=1):
     eta_tensor = torch.tensor(NUM_CLASSES * ETA, device=DEVICE)
-    prob_3 = build_probability_map_sim_3(width=width, height=height)
+    prob_31 = build_probability_map_sim_3_1(width=width, height=height)
     prob_32 = build_probability_map_sim_3_2(width=width, height=height)
-    sum_3 = prob_3.sum(dim=(1, 2, 3))
+    sum_31 = prob_31.sum(dim=(1, 2, 3))
     sum_32 = prob_32.sum(dim=(1, 2, 3))
-    value_3 = 1.0 / torch.maximum(sum_3, eta_tensor)
+    value_31 = 1.0 / torch.maximum(sum_31, eta_tensor)
     value_32 = 1.0 / torch.maximum(sum_32, eta_tensor)
-    return float((0.5 * value_3 + 0.5 * value_32).item())
+    return float((0.5 * value_31 + 0.5 * value_32).item())
 
 
 def est_delta_macro(width=10, height=1):
     eta_tensor = torch.tensor(ETA, device=DEVICE)
-    prob_3 = build_probability_map_sim_3(width=width, height=height)
+    prob_31 = build_probability_map_sim_3_1(width=width, height=height)
     prob_32 = build_probability_map_sim_3_2(width=width, height=height)
-    class_sum_3 = prob_3.sum(dim=(2, 3))
+    class_sum_31 = prob_31.sum(dim=(2, 3))
     class_sum_32 = prob_32.sum(dim=(2, 3))
-    value_3 = (1.0 / torch.maximum(class_sum_3, eta_tensor)).sum(dim=1)
+    value_31 = (1.0 / torch.maximum(class_sum_31, eta_tensor)).sum(dim=1)
     value_32 = (1.0 / torch.maximum(class_sum_32, eta_tensor)).sum(dim=1)
-    return float((0.5 * value_3 + 0.5 * value_32).item())
+    return float((0.5 * value_31 + 0.5 * value_32).item())
 
 
 def summarize_metric(metric_values):
@@ -270,20 +283,22 @@ def print_rankseg_summary(width, height, scores):
 
 def run_flip_sweep(sample_size=1000, width=10000, height=1):
     flip_rows = []
+    exact = use_exact_rankseg(width)
     simulation = simulate_rankseg(
         sample_size=sample_size,
         width=width,
         height=height,
+        exact=exact,
     )
     target = simulation["target"]
-    sim3_mask = simulation["sim3_mask"]
-    sim32_mask = ~sim3_mask
+    sim31_mask = simulation["sim31_mask"]
+    sim32_mask = ~sim31_mask
     scores = simulation["scores"]
     predictions = simulation["predictions"]
     base_optimizers = ["macro-Dice", "macro-IoU", "micro-Dice", "micro-IoU"]
     flip_probs = np.arange(0.0, 1.0001, 0.02)
     baselines = {}
-    num_sim_3 = int(sim3_mask.sum().item())
+    num_sim_31 = int(sim31_mask.sum().item())
     num_sim_32 = int(sim32_mask.sum().item())
 
     for base_optimizer in base_optimizers:
@@ -296,10 +311,10 @@ def run_flip_sweep(sample_size=1000, width=10000, height=1):
         baselines[base_optimizer] = baseline_metrics
         print("#" * 20)
         print(f"base_optimizer: {base_optimizer}; width: {width}; height: {height}")
-        print(f"Precomputing sim-3 flip sweep for {num_sim_3} samples")
-        sim3_summaries = build_group_flip_summaries(
-            base_prediction[sim3_mask],
-            target[sim3_mask],
+        print(f"Precomputing sim-3-1 flip sweep for {num_sim_31} samples")
+        sim31_summaries = build_group_flip_summaries(
+            base_prediction[sim31_mask],
+            target[sim31_mask],
             flip_probs,
             use_micro_metrics=use_micro_metrics,
         )
@@ -310,19 +325,19 @@ def run_flip_sweep(sample_size=1000, width=10000, height=1):
             flip_probs,
             use_micro_metrics=use_micro_metrics,
         )
-        for flip_prob_3 in flip_probs:
+        for flip_prob_31 in flip_probs:
             for flip_prob_32 in flip_probs:
-                sim3_score = sim3_summaries[float(flip_prob_3)]
+                sim31_score = sim31_summaries[float(flip_prob_31)]
                 sim32_score = sim32_summaries[float(flip_prob_32)]
-                dice_summary = combine_metric_summaries(sim3_score["dice"], sim32_score["dice"])
-                iou_summary = combine_metric_summaries(sim3_score["iou"], sim32_score["iou"])
+                dice_summary = combine_metric_summaries(sim31_score["dice"], sim32_score["dice"])
+                iou_summary = combine_metric_summaries(sim31_score["iou"], sim32_score["iou"])
                 row = {
                     "base_optimizer": base_optimizer,
-                    "flip_prob_3": float(flip_prob_3),
+                    "flip_prob_31": float(flip_prob_31),
                     "flip_prob_32": float(flip_prob_32),
                     "width": width,
                     "height": height,
-                    "num_sim_3": num_sim_3,
+                    "num_sim_31": num_sim_31,
                     "num_sim_32": num_sim_32,
                     "dice_mean": dice_summary["mean"],
                     "iou_mean": iou_summary["mean"],
@@ -345,7 +360,7 @@ def build_excess_risk_rows(flip_rows, baselines):
             {
                 "index": index,
                 "base_optimizer": row["base_optimizer"],
-                "flip_prob_3": row["flip_prob_3"],
+                "flip_prob_31": row["flip_prob_31"],
                 "flip_prob_32": row["flip_prob_32"],
                 "width": row["width"],
                 "height": row["height"],
@@ -359,7 +374,7 @@ def build_excess_risk_rows(flip_rows, baselines):
 def infer_baselines_from_flip_rows(flip_rows):
     baselines = {}
     for row in flip_rows:
-        if np.isclose(row["flip_prob_3"], 0.0) and np.isclose(row["flip_prob_32"], 0.0):
+        if np.isclose(row["flip_prob_31"], 0.0) and np.isclose(row["flip_prob_32"], 0.0):
             baselines[row["base_optimizer"]] = {
                 "dice_mean": row["dice_mean"],
                 "iou_mean": row["iou_mean"],
@@ -384,7 +399,7 @@ def read_csv_rows(input_path):
 
 
 def coerce_csv_row(row):
-    int_fields = {"index", "width", "height", "num_sim_3", "num_sim_32"}
+    int_fields = {"index", "width", "height", "num_sim_31", "num_sim_32"}
     str_fields = {"base_optimizer"}
     coerced = {}
     for key, value in row.items():
@@ -493,7 +508,7 @@ def main(refit=False, sample_size=10000, width=50000, height=1):
             [
                 "index",
                 "base_optimizer",
-                "flip_prob_3",
+                "flip_prob_31",
                 "flip_prob_32",
                 "width",
                 "height",
@@ -521,11 +536,11 @@ def main(refit=False, sample_size=10000, width=50000, height=1):
             flip_csv,
             [
                 "base_optimizer",
-                "flip_prob_3",
+                "flip_prob_31",
                 "flip_prob_32",
                 "width",
                 "height",
-                "num_sim_3",
+                "num_sim_31",
                 "num_sim_32",
                 "dice_mean",
                 "iou_mean",
@@ -539,7 +554,7 @@ def main(refit=False, sample_size=10000, width=50000, height=1):
             [
                 "index",
                 "base_optimizer",
-                "flip_prob_3",
+                "flip_prob_31",
                 "flip_prob_32",
                 "width",
                 "height",

@@ -5,6 +5,17 @@ from typing import Dict
 import torch
 
 
+def masked_bce_with_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    valid_mask: torch.Tensor,
+) -> torch.Tensor:
+    loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    weights = valid_mask.unsqueeze(1).to(dtype=loss.dtype)
+    denominator = (weights.sum() * logits.shape[1]).clamp_min(1.0)
+    return (loss * weights).sum() / denominator
+
+
 def masked_index_bce_with_logits(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -39,12 +50,7 @@ class RunningMultilabelMetrics:
             target_flat = targets[sample_index].reshape(-1)
             valid_flat = valid_mask[sample_index].reshape(-1)
             valid_targets = target_flat[valid_flat]
-            if valid_targets.numel() == 0:
-                raise ValueError("Cannot compute multilabel metrics for an image with no valid pixels.")
             truth_count = torch.bincount(valid_targets, minlength=self.num_classes).to(torch.float64)
-            present_classes = truth_count > 0
-            if not bool(present_classes.any().item()):
-                raise ValueError("Cannot compute macro metrics for an image with no present ground-truth class.")
             predicted_count = pred_flat.sum(dim=1).to(torch.float64)
             selected_true_predictions = pred_flat[:, valid_flat].gather(0, valid_targets.unsqueeze(0)).squeeze(0)
             tp = torch.bincount(
@@ -54,16 +60,19 @@ class RunningMultilabelMetrics:
             )
             fp = predicted_count - tp
             fn = truth_count - tp
-            # The paper's empirical convention averages only over classes that
-            # are present in the ground-truth mask of this image.
-            dice_by_class = (2 * tp) / (2 * tp + fp + fn).clamp_min(1)
-            iou_by_class = tp / (tp + fp + fn).clamp_min(1)
-            self.sums["macro_dice"] += float(
-                dice_by_class[present_classes].mean().item()
-            )
-            self.sums["macro_iou"] += float(
-                iou_by_class[present_classes].mean().item()
-            )
+            present = truth_count > 0
+            if bool(present.any().item()):
+                self.sums["macro_dice"] += float(
+                    (
+                        (2 * tp[present])
+                        / (2 * tp[present] + fp[present] + fn[present]).clamp_min(1)
+                    )
+                    .mean()
+                    .item()
+                )
+                self.sums["macro_iou"] += float(
+                    (tp[present] / (tp[present] + fp[present] + fn[present]).clamp_min(1)).mean().item()
+                )
             tp_micro, fp_micro, fn_micro = tp.sum(), fp.sum(), fn.sum()
             self.sums["micro_dice"] += float(
                 ((2 * tp_micro) / (2 * tp_micro + fp_micro + fn_micro).clamp_min(1)).item()

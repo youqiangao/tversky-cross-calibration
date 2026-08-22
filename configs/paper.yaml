@@ -47,8 +47,8 @@ training:
       augmentation: [horizontal_flip]
     isic2017:
       data_root: datasets/ISIC-2017
-      image_size: 512
-      batch_size: 4
+      image_size: 256
+      batch_size: 24
       split: {train: 2000, validation: 150, evaluation: 600}
       augmentation: [horizontal_flip, vertical_flip, rotation_0_90_180_270]
     kvasir_seg:

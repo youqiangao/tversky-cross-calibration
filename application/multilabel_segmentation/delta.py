@@ -12,14 +12,13 @@ from tqdm import tqdm
 
 from application.binary.utils import resize_logits_to_size
 
-from .conventions import MACRO_CLASS_CONVENTION
-from .dataset import DATASET_CHOICES, default_data_root_for, normalize_dataset_name
+from .dataset import DATASET_CHOICES, build_dataset, default_data_root_for, normalize_dataset_name
 from .engine import create_dataloader, load_trained_model
 from .utils import ensure_dir, resolve_device, save_csv, save_json
 
 
 DEFAULT_MODELS = ("unet", "fcn8")
-DELTA_VARIANT = f"{MACRO_CLASS_CONVENTION}_macro_mean_class_scaled_micro"
+DELTA_VARIANT = "present_macro_mean_class_scaled_micro"
 
 
 def _read_rows(path: Path) -> List[Dict[str, str]]:
@@ -32,24 +31,6 @@ def _load_original_target(dataset, mask_path: Path) -> np.ndarray:
         return dataset.base_dataset._mask_array_to_target(np.asarray(mask))
 
 
-def present_class_macro_delta(class_sums: torch.Tensor, present_classes, eta: float) -> float:
-    """Compute the paper's empirical macro-Delta for one image."""
-    present_index = torch.as_tensor(present_classes, dtype=torch.long, device=class_sums.device)
-    if present_index.numel() == 0:
-        raise ValueError("Cannot compute macro-Delta for an image with no present ground-truth class.")
-    present_sums = class_sums[present_index]
-    truncated = torch.maximum(present_sums, present_sums.new_tensor(float(eta)))
-    return float((1 / truncated).mean().item())
-
-
-def _rows_match_cache(rows, eta: float) -> bool:
-    return bool(rows) and all(
-        abs(float(row["eta"]) - eta) < 1e-12
-        and row.get("macro_class_convention") == MACRO_CLASS_CONVENTION
-        for row in rows
-    )
-
-
 def _summarize(rows, model, checkpoint, dataset, split, eta, num_classes, cached):
     return {
         "model": model,
@@ -58,7 +39,6 @@ def _summarize(rows, model, checkpoint, dataset, split, eta, num_classes, cached
         "split": split,
         "num_images": len(rows),
         "num_classes": num_classes,
-        "macro_class_convention": MACRO_CLASS_CONVENTION,
         "avg_present_classes": round(float(np.mean([float(row["num_present_classes"]) for row in rows])), 6),
         "avg_dimension_d": round(float(np.mean([float(row["dimension_d"]) for row in rows])), 6),
         "eta": float(eta),
@@ -77,7 +57,7 @@ def compute_checkpoint(checkpoint_path, model_label, dataset_name, data_root, sp
     details_path = ensure_dir(output_dir) / f"{model_label}_{split}_{suffix}_{DELTA_VARIANT}_details.csv"
     if details_path.exists() and not refit:
         rows = _read_rows(details_path)
-        if _rows_match_cache(rows, eta):
+        if rows and all(abs(float(row["eta"]) - eta) < 1e-12 for row in rows):
             return _summarize(rows, model_label, checkpoint_path, dataset_name, split, eta, num_classes, True)
     loader = create_dataloader(dataset_name, data_root, split, checkpoint["image_size"], batch_size, num_workers, False, False, max_samples)
     lookup = {sample.image_id: sample for sample in loader.dataset.samples}
@@ -91,26 +71,23 @@ def compute_checkpoint(checkpoint_path, model_label, dataset_name, data_root, sp
             sample = lookup[image_id]
             target = _load_original_target(loader.dataset, sample.mask_path)
             valid_np = target != loader.dataset.ignore_index
-            if not bool(valid_np.any()):
-                raise ValueError(f"Cannot compute Delta for {image_id}: the image has no valid pixels.")
             valid = torch.as_tensor(valid_np, dtype=torch.bool, device=device)
             probabilities = torch.sigmoid(resize_logits_to_size(logits[index : index + 1], (height, width)))[0]
             class_sums = probabilities[:, valid].sum(dim=1)
-            present_classes = [int(value) for value in np.unique(target[valid_np]) if 0 <= int(value) < num_classes]
-            macro_delta_present = present_class_macro_delta(class_sums, present_classes, eta)
-            present_sums = class_sums[torch.as_tensor(present_classes, device=device)]
+            present = [int(value) for value in np.unique(target[valid_np]) if 0 <= int(value) < num_classes]
+            present_sums = class_sums[torch.as_tensor(present, device=device)]
+            macro = float((1 / torch.maximum(present_sums, present_sums.new_tensor(eta))).mean().item())
             total = class_sums.sum()
             micro = float((num_classes / torch.maximum(total, total.new_tensor(num_classes * eta))).item())
             rows.append({
                 "family": "multilabel_segmentation", "dataset_name": dataset_name, "model": model_label,
                 "checkpoint": str(checkpoint_path), "split": split, "image_id": image_id,
                 "height": height, "width": width, "num_classes": num_classes,
-                "macro_class_convention": MACRO_CLASS_CONVENTION,
-                "num_present_classes": len(present_classes), "dimension_d": int(valid.sum().item()),
+                "num_present_classes": len(present), "dimension_d": int(valid.sum().item()),
                 "class_prob_sum_total": round(float(total.item()), 6),
                 "macro_class_sum_min": round(float(present_sums.min().item()), 6),
                 "macro_class_sum_max": round(float(present_sums.max().item()), 6),
-                "eta": eta, "delta_macro": round(macro_delta_present, 10), "delta_micro": round(micro, 10),
+                "eta": eta, "delta_macro": round(macro, 10), "delta_micro": round(micro, 10),
             })
     save_csv(rows, details_path)
     save_json({"records": rows}, details_path.with_suffix(".json"))

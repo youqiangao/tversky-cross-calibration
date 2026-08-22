@@ -2,22 +2,17 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import re
 import tempfile
 import unittest
 
 import numpy as np
 import torch
 
-from application.multilabel_segmentation.conventions import MACRO_CLASS_CONVENTION
-from application.multilabel_segmentation.delta import _rows_match_cache, present_class_macro_delta
-from application.multilabel_segmentation.metrics import RunningMultilabelMetrics
-from application.multilabel_segmentation.rank_eval import (
-    _rank_metrics_path,
-    _rows_match_protocol,
-    build_parser as build_multilabel_rank_parser,
-)
 from metrics import dice_coeff, iou
+from application.multilabel_segmentation.metrics import RunningMultilabelMetrics
 from scripts.build_paper_tables import build_table
+from scripts.check_paper_results import check_paper_results
 from tversky_cross_calibration.config import dataset_config, paper_config
 from tversky_cross_calibration.reproducibility import metadata_path, seed_everything, write_cache_metadata
 
@@ -49,6 +44,23 @@ class ReproducibilityTests(unittest.TestCase):
             if 'if __name__ == "__main__":' in source:
                 self.assertIn("seed_everything(42)", source, path.name)
 
+    def test_readme_simulation_commands_exist(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        commands = set(re.findall(r"python (simulation/sim-[0-9-]+\.py)", readme))
+        self.assertEqual(
+            commands,
+            {
+                "simulation/sim-1-1.py",
+                "simulation/sim-1-2.py",
+                "simulation/sim-2.py",
+                "simulation/sim-3.py",
+                "simulation/sim-4.py",
+                "simulation/sim-5.py",
+            },
+        )
+        for command in commands:
+            self.assertTrue((ROOT / command).is_file(), command)
+
     def test_cache_metadata_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
             csv_path = Path(directory) / "result.csv"
@@ -60,6 +72,11 @@ class ReproducibilityTests(unittest.TestCase):
         self.assertEqual(paper_config()["seed"], 42)
         self.assertEqual(dataset_config("cityscapes")["data_root"], "datasets/Cityscapes")
 
+    def test_isic_paper_config_uses_paper_resolution_and_batch_size(self):
+        config = dataset_config("isic2017")
+        self.assertEqual(config["image_size"], 256)
+        self.assertEqual(config["batch_size"], 24)
+
 
 class MetricConventionTests(unittest.TestCase):
     def test_empty_denominator_is_zero(self):
@@ -67,69 +84,15 @@ class MetricConventionTests(unittest.TestCase):
         self.assertTrue(torch.equal(dice_coeff(empty, empty), torch.zeros(2)))
         self.assertTrue(torch.equal(iou(empty, empty), torch.zeros(2)))
 
-    def test_multilabel_macro_uses_present_ground_truth_classes(self):
-        logits = torch.full((1, 3, 2, 2), -20.0)
-        logits[:, 0] = 20.0
-        targets = torch.zeros((1, 2, 2), dtype=torch.int64)
+    def test_semantic_macro_average_uses_present_classes_only(self):
+        metrics = RunningMultilabelMetrics(num_classes=3)
+        targets = torch.tensor([[[0, 1]]])
         valid = torch.ones_like(targets, dtype=torch.bool)
-        metrics = RunningMultilabelMetrics(3)
+        logits = torch.tensor([[[[20.0, -20.0]], [[-20.0, 20.0]], [[20.0, 20.0]]]])
         metrics.update(logits, targets, valid)
         result = metrics.compute_rounded(10)
         self.assertEqual(result["macro_dice"], 1.0)
         self.assertEqual(result["macro_iou"], 1.0)
-        self.assertEqual(result["micro_dice"], 1.0)
-        self.assertEqual(result["micro_iou"], 1.0)
-
-    def test_absent_class_predictions_do_not_enter_macro_average(self):
-        logits = torch.full((1, 3, 2, 2), -20.0)
-        logits[:, 0] = 20.0
-        logits[:, 2] = 20.0
-        targets = torch.zeros((1, 2, 2), dtype=torch.int64)
-        valid = torch.ones_like(targets, dtype=torch.bool)
-        metrics = RunningMultilabelMetrics(3)
-        metrics.update(logits, targets, valid)
-        result = metrics.compute_rounded(10)
-        self.assertEqual(result["macro_dice"], 1.0)
-        self.assertEqual(result["macro_iou"], 1.0)
-        self.assertAlmostEqual(result["micro_dice"], 2.0 / 3.0, places=9)
-        self.assertAlmostEqual(result["micro_iou"], 0.5, places=9)
-
-    def test_multilabel_metrics_reject_all_ignore_image(self):
-        logits = torch.zeros((1, 3, 2, 2))
-        targets = torch.full((1, 2, 2), 255, dtype=torch.int64)
-        valid = torch.zeros_like(targets, dtype=torch.bool)
-        metrics = RunningMultilabelMetrics(3)
-        with self.assertRaisesRegex(ValueError, "no valid pixels"):
-            metrics.update(logits, targets, valid)
-
-    def test_present_class_macro_delta_and_cache_convention(self):
-        class_sums = torch.tensor([100.0, 50.0, 10.0])
-        expected = (1.0 / 100.0 + 1.0 / 12.0) / 2.0
-        self.assertAlmostEqual(present_class_macro_delta(class_sums, [0, 2], 12.0), expected)
-        with self.assertRaisesRegex(ValueError, "no present ground-truth class"):
-            present_class_macro_delta(class_sums, [], 12.0)
-        current = [{"eta": "12.0", "macro_class_convention": MACRO_CLASS_CONVENTION}]
-        legacy = [{"eta": "12.0"}]
-        self.assertTrue(_rows_match_cache(current, 12.0))
-        self.assertFalse(_rows_match_cache(legacy, 12.0))
-
-
-class RankEvaluationProtocolTests(unittest.TestCase):
-    def test_original_resolution_is_the_only_protocol(self):
-        parser = build_multilabel_rank_parser()
-        self.assertFalse(hasattr(parser.parse_args([]), "full_resolution"))
-
-    def test_rank_cache_path_records_protocol_and_convention(self):
-        full = _rank_metrics_path("out", "voc2012", "unet", "test", None)
-        self.assertIn("original_present_ground_truth_macro", full.name)
-
-    def test_rank_cache_requires_current_protocol(self):
-        current = [{
-            "evaluation_resolution": "original",
-            "macro_class_convention": MACRO_CLASS_CONVENTION,
-        }]
-        self.assertTrue(_rows_match_protocol(current, "original"))
-        self.assertFalse(_rows_match_protocol([{"evaluation_resolution": "original"}], "original"))
 
 
 class BoundaryDiagnosticsTests(unittest.TestCase):
@@ -166,32 +129,41 @@ class TableGenerationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-evaluation"):
                 build_table(source, Path(directory) / "table.tex", ("dataset_name", "model", "delta_hat"))
 
-    def test_multilabel_table_requires_present_macro_convention(self):
-        columns = ("dataset_name", "model", "delta_macro_hat", "delta_micro_hat")
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "summary.csv"
-            output = Path(directory) / "table.tex"
-            source.write_text(
-                "dataset_name,model,delta_macro_hat,delta_micro_hat,split\n"
-                "voc2012,unet,0.1,0.01,test\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(ValueError, "macro-class convention"):
-                build_table(source, output, columns)
-            source.write_text(
-                "dataset_name,model,delta_macro_hat,delta_micro_hat,split,macro_class_convention\n"
-                "voc2012,unet,0.1,0.01,test,fixed_all_k\n",
-                encoding="utf-8",
-            )
-            with self.assertRaisesRegex(ValueError, "unsupported"):
-                build_table(source, output, columns)
-            source.write_text(
-                "dataset_name,model,delta_macro_hat,delta_micro_hat,split,macro_class_convention\n"
-                f"voc2012,unet,0.1,0.01,test,{MACRO_CLASS_CONVENTION}\n",
-                encoding="utf-8",
-            )
-            build_table(source, output, columns)
-            self.assertTrue(output.exists())
+    def test_paper_result_check_accepts_displayed_values(self):
+        from scripts.check_paper_results import (
+            BINARY_DELTA,
+            BINARY_PERFORMANCE,
+            MULTILABEL_DELTA,
+            MULTILABEL_PERFORMANCE,
+        )
+
+        summaries = {
+            "binary_delta": [
+                {"dataset_name": dataset, "model": model, "delta_hat": value}
+                for (dataset, model), value in BINARY_DELTA.items()
+            ],
+            "binary_performance": [
+                {"dataset_name": dataset, "model": model, "optimizer": optimizer, "dice": values[0], "iou": values[1]}
+                for (dataset, model), values in BINARY_PERFORMANCE.items()
+                for optimizer in ("RankDice", "RankIoU")
+            ],
+            "multilabel_delta": [
+                {"dataset_name": dataset, "model": model, "delta_macro_hat": values[0], "delta_micro_hat": values[1]}
+                for (dataset, model), values in MULTILABEL_DELTA.items()
+            ],
+            "multilabel_performance": [
+                {
+                    "dataset_name": dataset,
+                    "model": model,
+                    "optimizer": optimizer,
+                    f"{scope}_dice": values[0],
+                    f"{scope}_iou": values[1],
+                }
+                for (dataset, model, scope), values in MULTILABEL_PERFORMANCE.items()
+                for optimizer in (f"{scope}-Dice", f"{scope}-IoU")
+            ],
+        }
+        self.assertEqual(check_paper_results(summaries), [])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
+import numpy as np
+from PIL import Image
 import torch
 
 from tversky_cross_calibration.reproducibility import seed_everything
@@ -57,3 +59,15 @@ def logits_to_probabilities(logits: torch.Tensor) -> torch.Tensor:
 
 def resize_logits_to_size(logits: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
     return torch.nn.functional.interpolate(logits, size=size, mode="bilinear", align_corners=False)
+
+
+def save_probability_map(probabilities: np.ndarray, path: str | Path) -> None:
+    path = Path(path)
+    ensure_dir(path.parent)
+    np.save(path, probabilities)
+
+
+def save_mask_png(mask: np.ndarray, path: str | Path) -> None:
+    path = Path(path)
+    ensure_dir(path.parent)
+    Image.fromarray((mask.astype(np.uint8) * 255)).save(path)

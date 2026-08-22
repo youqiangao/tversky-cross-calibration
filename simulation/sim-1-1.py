@@ -15,11 +15,12 @@ os.environ["XDG_CACHE_HOME"] = str(FONTCONFIG_DIR.parent)
 
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sns
 import torch
 from matplotlib.ticker import FormatStrFormatter
 
 from metrics import accuracy, dice_coeff, iou
-from tversky_cross_calibration import predict_rank
+from tversky_cross_calibration.compat import rank_dice, rank_iou
 from tversky_cross_calibration.config import PROJECT_ROOT, paper_config
 from tversky_cross_calibration.reproducibility import cache_matches, cache_metadata, seed_everything, write_cache_metadata
 
@@ -38,8 +39,12 @@ def sim(sample_size=100, width=10, height=10):
     # Every sample shares the same probability map, so we only need to solve
     # the rank-based inference once and then expand it across the batch.
     prob_single = prob[:1]
-    predict_iou_single = predict_rank(prob_single, metric="iou")
-    predict_dice_single = predict_rank(prob_single, metric="dice")
+    if width < 100:
+        predict_iou_single, _, _ = rank_iou(prob_single, device=DEVICE, verbose=0)
+        predict_dice_single, _, _ = rank_dice(prob_single, device=DEVICE, verbose=0)
+    else:
+        predict_iou_single, _, _ = rank_iou(prob_single, device=DEVICE, verbose=0, exact=False)
+        predict_dice_single, _, _ = rank_dice(prob_single, device=DEVICE, verbose=0, exact=False)
 
     predict_iou = predict_iou_single.expand(sample_size, -1, -1, -1)
     predict_dice = predict_dice_single.expand(sample_size, -1, -1, -1)

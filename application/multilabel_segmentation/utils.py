@@ -5,6 +5,7 @@ from application.binary.utils import (
     save_checkpoint,
     save_csv,
     save_json,
+    save_probability_map,
     seed_everything,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "save_checkpoint",
     "save_csv",
     "save_json",
+    "save_probability_map",
     "seed_everything",
 ]

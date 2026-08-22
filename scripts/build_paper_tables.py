@@ -14,8 +14,6 @@ TABLE_SPECS = {
     "multilabel_delta": ("dataset_name", "model", "delta_macro_hat", "delta_micro_hat"),
     "multilabel_performance": ("dataset_name", "model", "optimizer", "macro_dice", "macro_iou", "micro_dice", "micro_iou"),
 }
-MACRO_CLASS_CONVENTION = "present_ground_truth"
-MULTILABEL_MACRO_COLUMNS = {"delta_macro_hat", "macro_dice", "macro_iou"}
 
 
 def read_and_validate(path: Path, required_columns: tuple[str, ...]) -> list[dict[str, str]]:
@@ -31,14 +29,6 @@ def read_and_validate(path: Path, required_columns: tuple[str, ...]) -> list[dic
     unexpected = sorted({row["split"] for row in rows if row["split"] != "test"})
     if unexpected:
         raise ValueError(f"{path} contains non-evaluation splits: {unexpected}")
-    if MULTILABEL_MACRO_COLUMNS.intersection(required_columns):
-        if "macro_class_convention" not in rows[0]:
-            raise ValueError(f"{path} must record the multilabel macro-class convention.")
-        conventions = sorted({row["macro_class_convention"] for row in rows})
-        if conventions != [MACRO_CLASS_CONVENTION]:
-            raise ValueError(
-                f"{path} uses unsupported multilabel macro-class conventions: {conventions}"
-            )
     return rows
 
 

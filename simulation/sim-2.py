@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from metrics import accuracy, dice_coeff, iou
-from tversky_cross_calibration import predict_rank
+from tversky_cross_calibration.compat import rank_dice, rank_iou
 from tversky_cross_calibration.config import PROJECT_ROOT, paper_config
 from tversky_cross_calibration.reproducibility import cache_matches, cache_metadata, seed_everything, write_cache_metadata
 
@@ -43,11 +43,13 @@ def build_prob_map_sim_1_2(width, height):
     return prob
 
 
-def solve_rank_predictions(prob_single):
-    return predict_rank(prob_single, metric="iou"), predict_rank(prob_single, metric="dice")
+def solve_rank_predictions(prob_single, exact):
+    predict_iou_single, _, _ = rank_iou(prob_single, device=DEVICE, verbose=0, exact=exact)
+    predict_dice_single, _, _ = rank_dice(prob_single, device=DEVICE, verbose=0, exact=exact)
+    return predict_iou_single, predict_dice_single
 
 
-def sim(sample_size=100, width=10, height=1):
+def sim(sample_size=100, width=10, height=1, exact=False):
     sim11_mask = torch.rand(sample_size, device=DEVICE) < 0.5
     sim12_mask = ~sim11_mask
 
@@ -60,8 +62,8 @@ def sim(sample_size=100, width=10, height=1):
     )
     target = torch.bernoulli(prob)
 
-    predict_iou_11, predict_dice_11 = solve_rank_predictions(prob_map_11)
-    predict_iou_12, predict_dice_12 = solve_rank_predictions(prob_map_12)
+    predict_iou_11, predict_dice_11 = solve_rank_predictions(prob_map_11, exact=exact)
+    predict_iou_12, predict_dice_12 = solve_rank_predictions(prob_map_12, exact=exact)
 
     predict_iou = torch.empty_like(prob, dtype=torch.bool)
     predict_dice = torch.empty_like(prob, dtype=torch.bool)
@@ -105,6 +107,16 @@ def sim(sample_size=100, width=10, height=1):
 
 def flip_prediction_iid(prediction, flip_prob):
     flip_mask = torch.rand(prediction.shape, device=prediction.device) < flip_prob
+    return torch.logical_xor(prediction, flip_mask)
+
+
+def conditional_flip_prediction(prediction, sim11_mask, flip_prob_11, flip_prob_12):
+    flip_prob_per_sample = torch.where(
+        sim11_mask,
+        torch.full((prediction.shape[0],), flip_prob_11, device=prediction.device),
+        torch.full((prediction.shape[0],), flip_prob_12, device=prediction.device),
+    )
+    flip_mask = torch.rand(prediction.shape, device=prediction.device) < flip_prob_per_sample.view(-1, 1, 1, 1)
     return torch.logical_xor(prediction, flip_mask)
 
 
@@ -176,12 +188,13 @@ def build_group_flip_summaries(base_prediction, target, flip_probs):
     return summaries
 
 
-def run_flip_sweep(sample_size=1000, width=10000, height=1):
+def run_flip_sweep(sample_size=1000, width=10000, height=1, exact=False):
     flip_rows = []
     simulation = sim(
         sample_size=sample_size,
         width=width,
         height=height,
+        exact=exact,
     )
     target = simulation["target"]
     sim11_mask = simulation["sim11_mask"]
@@ -319,6 +332,90 @@ def infer_width_height(rows, default_width, default_height):
     return int(rows[0].get("width", default_width)), int(rows[0].get("height", default_height))
 
 
+def get_zoom_upper(values):
+    sorted_values = np.sort(np.asarray(values, dtype=float))
+    if len(sorted_values) == 0:
+        return 1.0
+    candidate_index = max(4, int(np.ceil(0.2 * len(sorted_values))) - 1)
+    candidate_index = min(candidate_index, len(sorted_values) - 1)
+    candidate = sorted_values[candidate_index]
+    max_value = sorted_values[-1]
+    if candidate <= 0:
+        candidate = max_value * 0.1 if max_value > 0 else 1.0
+    zoom_upper = candidate * 1.1
+    if max_value > 0:
+        zoom_upper = min(zoom_upper, max_value * 0.75)
+        zoom_upper = max(zoom_upper, max_value * 0.05)
+    return zoom_upper
+
+
+def get_curve_rows(excess_rows, curve_name, base_optimizer="Dice"):
+    optimizer_rows = [row for row in excess_rows if row["base_optimizer"] == base_optimizer]
+    if curve_name == "flip_prob_12 = 0":
+        curve_rows = [row for row in optimizer_rows if np.isclose(row["flip_prob_12"], 0.0)]
+        return sorted(curve_rows, key=lambda row: row["flip_prob_11"])
+    if curve_name == "flip_prob_11 = 0":
+        curve_rows = [row for row in optimizer_rows if np.isclose(row["flip_prob_11"], 0.0)]
+        return sorted(curve_rows, key=lambda row: row["flip_prob_12"])
+    if curve_name == "flip_prob_11 = 1":
+        curve_rows = [row for row in optimizer_rows if np.isclose(row["flip_prob_11"], 1.0)]
+        return sorted(curve_rows, key=lambda row: row["flip_prob_12"])
+    if curve_name.startswith("flip_prob_11 = "):
+        flip_prob_11 = float(curve_name.removeprefix("flip_prob_11 = "))
+        curve_rows = [
+            row
+            for row in optimizer_rows
+            if np.isclose(row["flip_prob_11"], flip_prob_11)
+        ]
+        return sorted(curve_rows, key=lambda row: row["flip_prob_12"])
+    if curve_name == "flip_prob_12 = 1":
+        curve_rows = [row for row in optimizer_rows if np.isclose(row["flip_prob_12"], 1.0)]
+        return sorted(curve_rows, key=lambda row: row["flip_prob_11"])
+    if curve_name.startswith("flip_prob_12 = "):
+        flip_prob_12 = float(curve_name.removeprefix("flip_prob_12 = "))
+        curve_rows = [
+            row
+            for row in optimizer_rows
+            if np.isclose(row["flip_prob_12"], flip_prob_12)
+        ]
+        return sorted(curve_rows, key=lambda row: row["flip_prob_11"])
+    if curve_name == "diagonal average":
+        curve_rows = [
+            row
+            for row in optimizer_rows
+            if np.isclose(row["flip_prob_11"], row["flip_prob_12"])
+        ]
+        return sorted(curve_rows, key=lambda row: row["flip_prob_11"])
+    raise ValueError(f"Unknown curve name: {curve_name}")
+
+
+def plot_reference_curves(ax, excess_rows):
+    curve_styles = {
+        0.0: {"color": "#d62728", "label": "flip_prob_11 = 0"},
+        0.1: {"color": "#ff7f0e", "label": "flip_prob_11 = 0.1"},
+    }
+    for flip_prob_11, style in curve_styles.items():
+        curve_rows = get_curve_rows(excess_rows, f"flip_prob_11 = {flip_prob_11:.1f}")
+        curve_rows = [
+            row
+            for row in curve_rows
+            if np.isclose(row["flip_prob_12"] % 0.05, 0.0)
+            or np.isclose(row["flip_prob_12"] % 0.05, 0.05)
+        ]
+        x_values = np.array([row["excess_iou"] for row in curve_rows], dtype=float)
+        y_values = np.array([row["excess_dice"] for row in curve_rows], dtype=float)
+        ax.plot(
+            x_values,
+            y_values,
+            color=style["color"],
+            linestyle="-",
+            linewidth=2.0,
+            marker="o",
+            markersize=3.5,
+            label=style["label"],
+        )
+
+
 def plot_excess_risks(excess_rows, delta, output_path):
     excess_iou = np.array([row["excess_iou"] for row in excess_rows], dtype=float)
     excess_dice = np.array([row["excess_dice"] for row in excess_rows], dtype=float)
@@ -330,6 +427,7 @@ def plot_excess_risks(excess_rows, delta, output_path):
 
     x_zoom_min = 0.0
     x_zoom_max = 0.1
+    y_zoom_min = -0.004
     y_zoom_max = 0.2
     ax.scatter(excess_iou, excess_dice, s=16)
     ax.set_xlabel("Excess IoU risk", fontsize=20)

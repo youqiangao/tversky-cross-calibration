@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,11 +13,8 @@ import numpy as np
 import scipy
 import torch
 
-from .config import PAPER_CONFIG_PATH
-
-
 CANONICAL_SEED = 42
-CACHE_SCHEMA = 2
+CACHE_SCHEMA = 3
 
 
 def seed_everything(seed: int = CANONICAL_SEED, deterministic: bool = True) -> None:
@@ -61,9 +57,6 @@ def _git_commit() -> str:
 
 
 def cache_metadata(script: str, parameters: dict[str, Any]) -> dict[str, Any]:
-    config_hash = hashlib.sha256(PAPER_CONFIG_PATH.read_bytes()).hexdigest()
-    script_path = PAPER_CONFIG_PATH.parent.parent / "simulation" / f"{script}.py"
-    script_hash = hashlib.sha256(script_path.read_bytes()).hexdigest() if script_path.exists() else "unavailable"
     try:
         import rankseg
         rankseg_version = getattr(rankseg, "__version__", "0.0.5")
@@ -74,8 +67,6 @@ def cache_metadata(script: str, parameters: dict[str, Any]) -> dict[str, Any]:
         "script": script,
         "seed": CANONICAL_SEED,
         "parameters": parameters,
-        "config_sha256": config_hash,
-        "script_sha256": script_hash,
         "git_commit": _git_commit(),
         "versions": {
             "numpy": np.__version__,

@@ -10,7 +10,7 @@ authors:
   - family-names: Dai
     given-names: Ben
     email: "bendai@cuhk.edu.hk"
-    affiliation: "Department of Statistics, The Chinese University of Hong Kong"
+    affiliation: "Department of Statistics and Data Science, The Chinese University of Hong Kong"
 repository-code: "https://github.com/youqiangao/tversky-cross-calibration"
 license: MIT
 version: 1.0.0

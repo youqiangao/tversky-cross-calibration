@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--device", default="auto")
@@ -36,7 +37,7 @@ def main() -> None:
         int(args.image_size or defaults["image_size"]), int(args.batch_size or defaults["batch_size"]),
         int(args.epochs or defaults["epochs"]), float(args.lr or defaults["lr"]),
         float(args.weight_decay or defaults["weight_decay"]), args.num_workers, resolve_device(args.device),
-        args.max_train_samples, args.max_val_samples, args.resume_checkpoint, False,
+        args.threshold, args.max_train_samples, args.max_val_samples, args.resume_checkpoint, False,
     )
     print(f"Best checkpoint saved to: {checkpoint}")
 
